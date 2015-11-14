@@ -1,0 +1,32 @@
+//- index.jade
+
+doctype html
+html.no-js(lang='en', ng-app='eve-wspace', ng-strict-di, ng-csp)
+  head
+    meta(charset='utf-8')
+    meta(http-equiv='X-UA-Compatible', content='IE=edge')
+    meta(name='description', content='')
+    meta(name='viewport', content='width=device-width, initial-scale=1')
+    title(ng-bind-template='EVE-WSpace{{ $state.current.data.pageTitle ? " - " + $state.current.data.pageTitle : ""}}') EVE-WSpace
+
+    script(type='text/javascript', src='//cdn.polyfill.io/v2/polyfill.min.js')
+
+    link(rel='stylesheet', href='/css/vendors.css')
+    link(rel='stylesheet', href='/css/app.css')
+
+  body(ng-controller='AppCtrl as vm')
+
+    header.eve-wspace-header
+      //-include ./templates/_navbar
+
+      .alerts.ng-cloak(ng-controller='AlertsCtrl')
+        alert(ng-repeat='alert in alerts', type='{{ alert.type }}', close='closeAlert($index)') {{ alert.msg }}
+
+    .content.container-fluid
+      div.row.ng-cloak(ui-view)
+
+    footer.eve-wspace-footer.ng-cloak(role='contentinfo')
+      //-include ./templates/_footer
+
+    script(type='text/javascript', src='/js/vendors.js')
+    script(type='text/javascript', src='/js/app.js')

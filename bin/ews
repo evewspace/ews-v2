@@ -1,0 +1,312 @@
+#!/bin/sh
+":" //# comment; exec /usr/bin/env node --harmony "$0" "$@"
+'use strict';
+
+// Load libraries.
+const http = require('http')
+  , os = require('os')
+  , Promise = require('bluebird')
+  , path = require('path')
+  , _ = require('lodash')
+  , sqlite = require('sqlite3')
+  , Progress = require('multi-progress')
+  , Datastore = require('nedb')
+  , Zip = require('unzip')
+  , Url = require('url')
+  , fs = require('fs-promise')
+  , YAML = Promise.promisifyAll(require('js-yaml'));
+
+// Load package.json
+const pkg = require('../package.json');
+
+// Promisify fs#readdir
+const readdir = Promise.promisify(fs.readdir);
+
+// Create the program instance.
+const ews = require('commander');
+
+// Assign variables for the directories used by the EWS app
+const dbDir = path.join(__dirname, '../lib', 'db');
+const sdeExtractDir = ews.directory ? ews.directory : path.join(os.tmpdir(), 'ccp_sde');
+
+// Create the multi-process instance
+const bars = new Progress();
+
+// Register the version of EWS
+ews.version(pkg.version)
+ // Register top-level options
+ .option('-d --directory', 'The directory containing the extracted SDE files.');
+
+/**
+ * @function unzipAsync
+ * @param {string} file The file to be unzipped
+ * @param {string} target The unzip target directory
+ */
+const unzipAsync = function(file, target) {
+  return new Promise(function(resolve, reject) {
+    fs.createReadStream(file)
+    .pipe(Zip.Extract({ path: target }))
+    .on('close', function() {
+      let files = fs.readdirSync(target);
+      return resolve(files);
+    })
+    .on('error', function() {
+      reject(error);
+    });
+  });
+}
+
+/**
+ * @function getAsync
+ * @param {string} url
+ * @param {string} file The file to create.
+ */
+const getAsync = function(url, file) {
+  return new Promise(function(resolve, reject) {
+    // Check to see if the archive has already been downloaded
+    fs.ensureFile(file).then(function() {
+      // the archive has been downloaded, stat it
+      fs.stat(file).then(function(stats) {
+        let parse = Url.parse(url);
+        // http#head()
+        http.request({
+          hostname: parse.hostname,
+          protocol: parse.protocol,
+          path: parse.path,
+          method: 'head'
+        }, function(res) {
+          // size of the archive on the server
+          let len = parseInt(res.headers['content-length'], 10);
+          if(len !== stats.size) {
+            // the file is not the right size
+            throw new Error('SDE zipfile not fully downloaded');
+          }
+          return;
+        }).end();
+        // return the file string
+        return resolve(file);
+      });
+    })
+    .catch(function() {
+      // create the file stream
+      let fd = fs.createWriteStream(file);
+      http.get(url, function(res) {
+        let len = parseInt(res.headers['content-length'], 10);
+        if(res.statusCode !== 200) {
+          return reject('HTTP status was not 200. Server returned ' + res.statusCode);
+        }
+        let bar = bars.newBar(`Downloading: [:bar] :percent :current/:total :etas`, {
+          width: 30,
+          total: len
+        });
+        // pipe the response body to the file stream
+        res.pipe(fd);
+        res.on('data', function(chunk) {
+          bar.tick(chunk.length);
+        });
+        fd.on('finish', function() {
+          return fd.close();
+        });
+      })
+      .on('end', function() {
+        return resolve(file);
+      })
+      .on('error', function(err) {
+        // delete the file
+        fs.unlink(file);
+        return reject(err);
+      });
+    });
+  });
+}
+
+/**
+ * Download the CCP SDE to the user's temp dir
+ * @function download-sde
+ * @param {string} url
+ */
+ews.command('download-sde [url]')
+  .description('Download and extract the CCP SDE.')
+  .action(function(url) {
+
+    let extractDir = path.join(os.tmpdir(), 'ccp_sde');
+
+    if(!url) {
+      console.log('URL not specified.');
+      return ews.help();
+    }
+
+    getAsync(url, path.join(os.tmpdir(), 'datadump.zip')).then(function(file) {
+      return fs.ensureDir(extractDir).then(function() {
+        return unzipAsync(file, extractDir).then(function(files) {
+          return console.log(`SDE extracted.`);
+        });
+      });
+    });
+
+  });
+
+/**
+ * Load a YAML file asynchonously
+ * @function loadAsync
+ * @param {string} file
+ * @param {object} options
+ */
+const LoadAsync = function(file, options) {
+  return new Promise(function(resolve, reject) {
+    try {
+      let data = YAML.load(fs.readFileSync(file, options));
+      return resolve(data);
+    } catch (e) {
+      return reject(e);
+    }
+  });
+}
+
+/**
+ * Convert the YAML files in the CCP SDE to a NeDB collection
+ * @function convert-yaml
+ * @param {string} directory The directory containing the extracted SDE files.
+ */
+ews.command('convert-yaml')
+  .description('Create the item database from the SDE YAML files.')
+  .option('-d --directory', 'The directory containing the extracted SDE files.')
+  .action(function() {
+
+    // Create the datastore instance
+    const DB = new Datastore({
+      filename: path.join(dbDir, 'staticData.db'),
+      autoload: true
+    });
+
+    // Create an index on the staticData collection on the id field
+    DB.ensureIndex({ fieldName: 'itemID' })
+
+    // Promisify the DB instance
+    Promise.promisifyAll(DB);
+
+    // Only load the YAML files that actually matter
+    const validFiles = ['categoryIDs.yaml', 'graphicIDs.yaml', 'groupIDs.yaml', 'iconIDs.yaml', 'typeIDs.yaml']
+
+    // Read the sdeExtractDir
+    readdir(sdeExtractDir)
+    // Map files in the directory
+    .map(function(filename) {
+      // If the file is a YAML file and is in the validFiles array
+      if((path.extname(filename) === '.yaml') && (_.contains(validFiles, filename))) {
+        //Set yamlFile
+        const yamlFile = path.join(sdeExtractDir, filename);
+        // Load the yamlFile
+        LoadAsync(yamlFile, 'utf8').then(function(data) {
+          const keys = Object.keys(data);
+          let bar = bars.newBar(`[:bar] :percent :current/:total ${ filename } :etas`, {
+            width: 30,
+            total: keys.length
+          });
+          keys.forEach(function(key) {
+            // Upsert the item object into the collection
+            DB.updateAsync({ itemID: parseInt(key, 10) },
+              _.assign({}, { itemID: parseInt(key, 10) }, data[key]),
+              { upsert: true }
+            ).then(function() {
+              bar.tick();
+            }).catch(function(err){
+              console.log(err)
+            });
+          });
+        });
+      }
+    });
+  });
+
+ews.command('test-yaml')
+  .description('Test the staticData datastore')
+  .action(function() {
+    const DB = new Datastore({
+      filename: path.join(dbDir, 'staticData.db'),
+      autoload: true
+    });
+
+    Promise.promisifyAll(DB);
+
+    DB.findOneAsync({}).then(function(doc) {
+      console.log(doc);
+    });
+  });
+
+/**
+ * Convert the sqlite database in the CCP SDE to a NeDB collection
+ * @function convert-sqlite
+ * @param {string} directory The directory containing the extracted SDE files.
+ */
+ews.command('convert-sqlite')
+  .description('Create the static celestial database from the SDE Sqlite database.')
+  .option('-d --directory', 'The directory containing the extracted SDE files.')
+  .action(function() {
+
+    // Create the datastore instance
+    let DB = new Datastore({
+      filename: path.join(dbDir, 'universeData.db'),
+      autoload: true
+    });
+
+    // Create an index on the staticData collection on the id field
+    DB.ensureIndex({ fieldName: 'itemID', unique: true })
+
+    // Promisify the DB instance
+    Promise.promisifyAll(DB);
+
+    // Set the sqliteFile
+    const sqliteFile = path.join(sdeExtractDir, 'universeDataDx.db');
+
+    // Make sure the sqlite file is present
+    fs.ensureFile(sqliteFile).then(function() {
+      // Load the sqlite database and promisify the sqlite instance
+      const sqliteDB = Promise.promisifyAll(new sqlite.Database(sqliteFile));
+
+      let bar = {};
+
+      // select all rows in the mapDenormalize
+      sqliteDB.allAsync('SELECT * from mapDenormalize').then(function(rows) {
+        bar = bars.newBar(`[:bar] :percent :current/:total universeData.db :etas`, {
+          width: 30,
+          total: rows.length
+        });
+        return rows;
+      })
+      .map(function(row) {
+        // upsert each row into the collection
+        DB.updateAsync({ itemID: row.itemID }, row, { upsert: true }).then(function() {
+          bar.tick();
+        })
+      }).finally(function() {
+        // remember to close the database
+        sqliteDB.close();
+      });
+    });
+  });
+
+/**
+ * Run the database migrations
+ * @function migrate
+ */
+ews.command('migrate')
+  .description('Run the database migrations')
+  .action(function() {
+
+  });
+
+// Parse the commandline arguments
+ews.parse(process.argv);
+
+// If the command is not valid, print the help message
+let validCommand = false;
+
+_.forEach(ews.args, function(command) {
+  validCommand = _.contains(ews.commands, command);
+});
+
+if(!validCommand) {
+  console.log('Unknown command. ' + ews.args);
+  return ews.help();
+}

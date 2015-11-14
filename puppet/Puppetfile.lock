@@ -1,0 +1,29 @@
+FORGE
+  remote: https://forgeapi.puppetlabs.com
+  specs:
+    counsyl-nginx (0.5.0)
+      counsyl-sys (>= 0.9.13)
+    counsyl-redis (0.9.3)
+      counsyl-sys (>= 0.9.13)
+    counsyl-sys (0.9.19)
+      puppetlabs-stdlib (< 5.0.0, >= 4.7.0)
+    puppetlabs-apt (2.2.0)
+      puppetlabs-stdlib (< 5.0.0, >= 4.5.0)
+    puppetlabs-mongodb (0.11.0)
+      puppetlabs-apt (< 3.0.0, >= 1.0.0)
+      puppetlabs-stdlib (< 5.0.0, >= 2.2.0)
+    puppetlabs-stdlib (4.9.0)
+
+GIT
+  remote: https://github.com/alphagov/puppet-curl.git
+  ref: master
+  sha: 4f657d5cbbb617dd6b1c6a9a371b1f3d667b3922
+  specs:
+    alphagov-curl (0.0.1)
+
+DEPENDENCIES
+  alphagov-curl (>= 0)
+  counsyl-nginx (>= 0)
+  counsyl-redis (>= 0)
+  puppetlabs-mongodb (>= 0)
+
